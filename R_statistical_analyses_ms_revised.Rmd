@@ -5,12 +5,11 @@ date: "25/10/2021"
 output: html_document
 ---
 
-Load packages into session, and print package version.
-
 ```{r}
 library(knitr)
 ```
 
+Load packages into session, and print package version.
 
 ```{r results=F, message=F, warning=F}
 library(plyr); packageVersion("plyr")
@@ -25,7 +24,7 @@ library(viridis); packageVersion("viridis")
 library(dplyr); packageVersion("dplyr")
 library(extrafont); packageVersion("extrafont")
 library(vegan); packageVersion("vegan")
-library(ggpubr)
+library(ggpubr); packageVersion("vegan")
 
 set.seed(100)
 ```
