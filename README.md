@@ -1,4 +1,4 @@
-# 16S rRNA statistical analyses for takah\u113 gut microbiota
+# 16S rRNA statistical analyses for takahē gut microbiota
 
 RStudio Statistical analyses associated with the paper [Gut microbiota of the threatened takahe: biogeographic patterns and conservation implications](https://animalmicrobiome.biomedcentral.com/articles/10.1186/s42523-021-00158-5) published in _Animal Microbiome_ 2022.
 
