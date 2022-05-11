@@ -1,0 +1,1460 @@
+---
+title: "Statistical analyses"
+author: "A.G. West"
+date: "25/10/2021"
+output: html_document
+---
+
+Load packages into session, and print package version.
+
+```{r}
+library(knitr)
+```
+
+
+```{r results=F, message=F, warning=F}
+library(plyr); packageVersion("plyr")
+library(ggplot2); packageVersion("ggplot2")
+library(phyloseq); packageVersion("phyloseq")
+library(gridExtra); packageVersion("gridExtra")
+library(ggsignif); packageVersion("ggsignif")
+library(ggsci); packageVersion("ggsci")
+library(hrbrthemes); packageVersion("hrbrthemes")
+library(tidyverse); packageVersion("tidyverse")
+library(viridis); packageVersion("viridis")
+library(dplyr); packageVersion("dplyr")
+library(extrafont); packageVersion("extrafont")
+library(vegan); packageVersion("vegan")
+library(ggpubr)
+
+set.seed(100)
+```
+
+
+#Phyloseq
+
+Import files:
+
+```{r}
+seqtab.nochim <- readRDS("16S_ASV_table_nochim.rds")
+taxa <- readRDS("16S_taxa_table.rds")
+tree <- readRDS("phylo_tree.rds")
+map <- read.table("mapping_file.txt",header = T, sep = '\t')
+row.names(map) <- map$SampleID
+  
+# Make sure row names are the same between map and ASV table
+identical(rownames(seqtab.nochim), rownames(map))
+```
+
+```{r}
+taxa <- data.frame(taxa)
+taxa$Family[is.na(taxa$Family)]="Unclassified"
+taxa$Genus[is.na(taxa$Genus)]="Unclassified"
+taxa$Species[is.na(taxa$Species)]="unclassified"
+taxa$Taxonomy <- paste(taxa$Genus, taxa$Species, sep=" ")
+
+taxmatrix <- as.matrix(taxa) 
+```
+
+
+Create a phyloseq object for downstream analyses:
+
+```{r}
+ps <- phyloseq(tax_table(taxmatrix), sample_data(map),otu_table(seqtab.nochim, taxa_are_rows = FALSE), phy_tree(tree$tree))
+               
+ps
+```
+
+#Filtering
+
+##Taxonomic filtering 
+
+Use to filter out non-target taxa e.g. mitochondria, chloroplasts. 
+
+```{r}
+dir.create("tables")
+# Show available ranks in the dataset
+rank_names(ps)
+
+ps_tax_table <- as.data.frame(tax_table(ps))
+ps_tax_table$Phylum[is.na(ps_tax_table$Phylum)]="Unclassified"
+asv_table_ps<-as.data.frame(t(otu_table(ps)))
+asv_table_wTax_ps <- cbind(asv_table_ps, ps_tax_table)
+
+#Find proportion of unassigned reads at phylum level
+Phyla.sum.ps<-aggregate(asv_table_wTax_ps[,1:57], list(asv_table_wTax_ps$Phylum),sum)
+row.names(Phyla.sum.ps)<- Phyla.sum.ps$Group.1
+Phyla.sum.ps$Group.1 <- NULL
+P_rowsum.ps <- rowSums(Phyla.sum.ps)
+P_rowsum.ps
+write.csv(P_rowsum.ps, "tables/P_rowsum_ps.csv")
+
+# Create table, number of features for each phyla
+table(tax_table(ps)[, "Phylum"], exclude = NULL)
+
+ps0 <- subset_taxa(ps, !is.na(Phylum) & !Phylum %in% c("", "uncharacterized"))
+
+phyla2Filter = c("<NA>")
+ps1 = subset_taxa(ps0, !Phylum %in% phyla2Filter)
+
+phyla2Filter = c("Chloroplast","Rickettsiales")
+ps1 = subset_taxa(ps1, !Order %in% phyla2Filter)
+
+ps1
+rank_names(ps1)
+table(tax_table(ps1)[,"Phylum"], exclude = NULL)
+```
+
+
+##Filter low-abundance ASVs
+
+Filter out ASVs that have a total relative sequence abundance of < 0.001%
+
+```{r}
+minTotRelAbun = 1e-5 #(0.00001)
+x = taxa_sums(ps1)
+keepTaxa = (x / sum(x)) > minTotRelAbun  
+ps2 = prune_taxa(keepTaxa, ps1)
+ps2
+
+# Save the new taxa table for rarefaction
+Ntaxa <- tax_table(ps2)
+```
+
+#Rarefaction
+
+
+```{r}
+set.seed(100)
+
+source('Y:/R_analyses/Takahe_Final/ggrarefaction_curves.R')
+library(vegan)
+
+rcurves <- ggrare(ps2, step = 500, se = FALSE) 
+rcurves_intcpt <- rcurves + geom_vline(xintercept=8000, color = "blue")
+ggsave("rarefaction_curves_16S_takahe.png", rcurves_intcpt, height = 10, width = 20)
+
+
+rASV <- rarefy_even_depth(otu_table(ps2, taxa_are_rows = FALSE), sample.size = 8000,replace = FALSE) 
+
+#Save the rarefied ASV table
+write.csv(rASV, "./tables/rASV_table.csv")
+```
+
+Relabel ASV sequence rownames with 'ASV1_Taxonomy'
+
+```{r}
+rASV.df = as.data.frame(rASV)
+rASV.df = rASV.df[,order(colSums(rASV.df),decreasing = T)]
+Ntaxa.df = as.data.frame(Ntaxa)
+
+to.remove = setdiff(rownames(Ntaxa.df), colnames(rASV.df))
+Ntaxa.df = Ntaxa.df[!row.names(Ntaxa.df) %in% to.remove,]
+
+identical(rownames(Ntaxa.df), colnames(rASV.df))
+Ntaxa.df = Ntaxa.df[colnames(rASV.df),]
+identical(rownames(Ntaxa.df), colnames(rASV.df))
+
+Ntaxa.df$ASV_ID <- paste("ASV_", 1:nrow(Ntaxa.df), sep="")
+Ntaxa.df$concat = paste(Ntaxa.df$ASV_ID, Ntaxa.df$Taxonomy, sep = "_")
+rownames(Ntaxa.df) = Ntaxa.df$concat
+names(rASV.df) = rownames(Ntaxa.df)
+
+Ntaxa.df$ASV_ID = NULL
+Ntaxa.df$concat = NULL
+Ntaxa.df = as.matrix(Ntaxa.df)
+```
+
+Create rarefied phyloseq objects - cannot create phyloseq object with the tree file after renaming ASVs so here we will create two seperate objects.
+
+```{r}
+psR <- phyloseq(otu_table(rASV.df, taxa_are_rows = F),
+                sample_data(map),
+                tax_table(Ntaxa.df))
+
+psR
+
+write.csv(cbind(t(rASV),as.data.frame(tax_table(psR))), "tables/rASV_wTax.csv")
+```
+
+```{r}
+psRT <- phyloseq(otu_table(rASV, taxa_are_rows = F),
+                 sample_data(map),
+                 tax_table(Ntaxa),
+                 phy_tree(tree$tree))
+
+psRT
+```
+
+#Taxonomy sums
+
+Calculate the number of ASVs per sample and the prevalence of each ASV
+
+```{r}
+asv_df <- t(otu_table(psR))
+avg_ASV <- colSums(asv_df != 0)
+write.csv(avg_ASV, "./tables/avg_ASV.csv")
+
+prev_asv_df <- otu_table(psR)
+prev_ASV <- colSums(prev_asv_df != 0)
+write.csv(prev_ASV, "./tables/prev_ASV.csv") 
+```
+
+Find the total number of reads per sample and totals for phylum and species level classifications
+
+```{r}
+asv_table<-as.data.frame(t(otu_table(psR)))
+taxo_table<-as.data.frame(tax_table(psR))
+asv_table_wTax <- cbind(asv_table, taxo_table)
+
+Phyla.sum<-aggregate(asv_table_wTax[,1:57], list(asv_table_wTax$Phylum),sum)
+row.names(Phyla.sum)<- Phyla.sum$Group.1
+Phyla.sum$Group.1 <- NULL
+P_rowsum <- rowSums(Phyla.sum)
+
+write.csv(Phyla.sum, "./tables/Phyla_sum_per_sample.csv")
+write.csv(P_rowsum, "./tables/P_rowsum.csv")
+```
+
+```{r}
+taxa.sum <- aggregate(asv_table_wTax[,1:57], list(asv_table_wTax$Taxonomy),sum)
+row.names(taxa.sum)<- taxa.sum$Group.1
+taxa.sum$Group.1 <- NULL
+t_rowsum <- rowSums(taxa.sum) 
+write.csv(t_rowsum, "./tables/taxa_sum_table.csv")
+write.csv(taxa.sum, "./tables/taxa_sum_per_sample.csv")
+```
+
+#Core Microbiome
+
+```{r  results=F, message=F, warning=F}
+library(microbiome); packageVersion("microbiome")
+```
+
+
+```{r fig.cap="Core taxa of the takah\u113 gut microbiota", fig.height = 15, fig.width = 22, dpi=300}
+pseq.rel <- microbiome::transform(psR, "compositional")
+
+#Core at >0.1% abundance and 90% prevalence
+core.taxa.standard <- core_members(pseq.rel, detection = 0.1/100, prevalence = 90/100)
+core.taxa.standard
+```
+
+```{r}
+#Core at >0.01% abundance and 70% prevalence
+core.taxa.standard <- core_members(pseq.rel, detection = 0.01/100, prevalence = 70/100) #pick the core
+core.taxa.standard
+
+#Relative population frequencies
+head(prevalence(psR, detection = 1/100, sort = TRUE, count = T, include.lowest = T), n=20) #absolute counts
+head(prevalence(pseq.rel, detection = 0.01/100, sort = TRUE, include.lowest = T), n=20) #relative prevalence
+```
+
+```{r}
+pseq.core <- core(pseq.rel, detection = 0.01/100, prevalence = 70/100)
+
+core_RA <- transform_sample_counts(pseq.core, function(x) {x/sum(x)})
+core.glom <- tax_glom(core_RA, taxrank = 'Taxonomy')
+core.df <- psmelt(core.glom)
+
+core.glom.absolute <- tax_glom(pseq.core, taxrank = "Taxonomy")
+core.ab.df <- psmelt(core.glom.absolute)
+
+dir.create("core")
+```
+
+```{r fig.cap = "Core microbiota of the takah\u113 gut grouped by location", fig.height = 15, fig.width = 22, dpi=300}
+core_plot <- ggplot(data=core.df, aes(x=Actual_Name, y=Abundance, fill = Taxonomy)) + 
+
+  geom_bar(aes(), stat="identity", position="stack")  +
+  
+  theme_ipsum() + theme(axis.text.x = element_blank(),
+
+          axis.ticks.x = element_blank(),
+
+          axis.text.y=element_text(size=15),
+
+          axis.title.y=element_text(size=26),
+          
+          axis.title.x = element_text(size=26),
+          
+          strip.text.x = element_text(size = 18),
+
+          panel.grid.major = element_blank(),
+
+          panel.grid.minor = element_blank(),
+
+          panel.background = element_blank(),
+
+          legend.box.background = element_rect(),
+
+          legend.box.margin = margin(5, 5, 5, 5),
+
+          legend.position="bottom",
+
+          legend.title = element_text(face = "bold", size = 24),
+          
+          legend.text = element_text(size = 20)) +
+  
+  labs(x="Individual faecal samples", y="Relative sequence abundance") + 
+  
+  facet_grid(~Location, scales = "free_x", space = "free",labeller = labeller(Location = label_wrap_gen(10))) +
+  
+  scale_fill_futurama(alpha=0.85) 
+
+core_plot
+
+ggsave("./core/core_microbiome_taxaplot.png",height = 15, width = 22, dpi=400, bg = "white") 
+```
+```{r fig.cap = "Proportion of core taxa in the takah\u113 gut grouped by location", fig.height = 15, fig.width = 22, dpi=300}
+core_absolute_plot <- ggplot(data=core.ab.df, aes(x=Actual_Name, y=Abundance, fill = Taxonomy)) + 
+
+  geom_bar(aes(), stat="identity", position="stack")  +
+  
+  theme_ipsum() + theme(axis.text.x = element_blank(),
+
+          axis.ticks.x = element_blank(),
+
+          axis.text.y=element_text(size=15),
+
+          axis.title.y=element_text(size=26),
+          
+          axis.title.x = element_text(size=26),
+          
+          strip.text.x = element_text(size = 18),
+
+          panel.grid.major = element_blank(),
+
+          panel.grid.minor = element_blank(),
+
+          panel.background = element_blank(),
+
+          legend.box.background = element_rect(),
+
+          legend.box.margin = margin(5, 5, 5, 5),
+
+          legend.position="bottom",
+
+          legend.title = element_text(face = "bold", size = 24),
+          
+          legend.text = element_text(size = 20)) +
+  
+ labs(x="Individual faecal samples", y="Relative sequence abundance") + 
+  
+  facet_grid(~Location, scales = "free_x", space = "free",labeller = labeller(Location = label_wrap_gen(10))) +
+  
+  scale_fill_futurama(alpha=0.85) 
+
+core_absolute_plot
+
+ggsave("./core/core_abosulte_microbiome_taxaplot.png", height = 15, width = 22,dpi=400, bg = "white") 
+```
+
+#Alpha Diversity
+
+Use phyloseq's estimate_richness function to get desired diversity estimates. Test for normality and then employ ANOVA or Kruskal-Wallis tests for each target covariate.
+
+
+```{r}
+rich_psR <- estimate_richness(psR, measures = c("Chao1","Shannon", "InvSimpson"))
+rich <- list(rich_psR, sample_data(psR)$SampleID, sample_data(psR)$Location, sample_data(psR)$Supplemental_feeding, sample_data(psR)$Hatch_Site, sample_data(psR)$Sex, sample_data(psR)$Habitat)
+names(rich) <- c("alpha_diversity", "SampleID", "Location","Supplemental feeding", "Hatch Site", "Sex","Habitat")
+```
+
+```{r, results='hide'}
+# Location
+if (shapiro.test(rich$alpha_diversity[["Chao1"]])$p.value > 0.05)
+{print(summary(aov(rich$alpha_diversity[["Chao1"]]~rich$Location, data = rich)))} else {print(kruskal.test(rich$alpha_diversity$Chao1, rich$Location))}
+
+if (shapiro.test(rich$alpha_diversity[["Shannon"]])$p.value > 0.05)
+{print(summary(aov(rich$alpha_diversity[["Shannon"]]~rich$Location, data = rich)))} else {print(kruskal.test(rich$alpha_diversity$Shannon, rich$Location))}
+
+if (shapiro.test(rich$alpha_diversity[["InvSimpson"]])$p.value > 0.05)
+{print(summary(aov(rich$alpha_diversity[["InvSimpson"]]~rich$Location, data = rich)))} else {print(kruskal.test(rich$alpha_diversity$InvSimpson, rich$Location))}
+
+# Supplemental Feeding
+if (shapiro.test(rich$alpha_diversity[["Chao1"]])$p.value > 0.05)
+{print(summary(aov(rich$alpha_diversity[["Chao1"]]~rich$`Supplemental feeding`, data = rich)))} else {print(kruskal.test(rich$alpha_diversity$Chao1, rich$`Supplemental feeding`))}
+
+if (shapiro.test(rich$alpha_diversity[["Shannon"]])$p.value > 0.05)
+{print(summary(aov(rich$alpha_diversity[["Shannon"]]~rich$`Supplemental feeding`, data = rich)))} else {print(kruskal.test(rich$alpha_diversity$Shannon, rich$`Supplemental feeding`))}
+
+if (shapiro.test(rich$alpha_diversity[["InvSimpson"]])$p.value > 0.05)
+{print(summary(aov(rich$alpha_diversity[["InvSimpson"]]~rich$`Supplemental feeding`, data = rich)))} else {print(kruskal.test(rich$alpha_diversity$InvSimpson, rich$`Supplemental feeding`))}
+
+# Hatch Site
+if (shapiro.test(rich$alpha_diversity[["Chao1"]])$p.value > 0.05)
+{print(summary(aov(rich$alpha_diversity[["Chao1"]]~rich$`Hatch Site`, data = rich)))} else {print(kruskal.test(rich$alpha_diversity$Chao1, rich$`Hatch Site`))}
+
+if (shapiro.test(rich$alpha_diversity[["Shannon"]])$p.value > 0.05)
+{print(summary(aov(rich$alpha_diversity[["Shannon"]]~rich$`Hatch Site`, data = rich)))} else {print(kruskal.test(rich$alpha_diversity$Shannon, rich$`Hatch Site`))}
+
+if (shapiro.test(rich$alpha_diversity[["InvSimpson"]])$p.value > 0.05)
+{print(summary(aov(rich$alpha_diversity[["InvSimpson"]]~rich$`Hatch Site`, data = rich)))} else {print(kruskal.test(rich$alpha_diversity$InvSimpson, rich$`Hatch Site`))}
+
+# Nest Site
+if (shapiro.test(rich$alpha_diversity[["Chao1"]])$p.value > 0.05)
+{print(summary(aov(rich$alpha_diversity[["Chao1"]]~rich$`Nest Site`, data = rich)))} else {print(kruskal.test(rich$alpha_diversity$Chao1, rich$`Nest Site`))}
+
+if (shapiro.test(rich$alpha_diversity[["Shannon"]])$p.value > 0.05)
+{print(summary(aov(rich$alpha_diversity[["Shannon"]]~rich$`Nest Site`, data = rich)))} else {print(kruskal.test(rich$alpha_diversity$Shannon, rich$`Nest Site`))}
+
+if (shapiro.test(rich$alpha_diversity[["InvSimpson"]])$p.value > 0.05)
+{print(summary(aov(rich$alpha_diversity[["InvSimpson"]]~rich$`Nest Site`, data = rich)))} else {print(kruskal.test(rich$alpha_diversity$InvSimpson, rich$`Nest Site`))}
+
+# Sex
+if (shapiro.test(rich$alpha_diversity[["Chao1"]])$p.value > 0.05)
+{print(summary(aov(rich$alpha_diversity[["Chao1"]]~rich$Sex, data = rich)))} else {print(kruskal.test(rich$alpha_diversity$Chao1, rich$Sex))}
+
+if (shapiro.test(rich$alpha_diversity[["Shannon"]])$p.value > 0.05)
+{print(summary(aov(rich$alpha_diversity[["Shannon"]]~rich$Sex, data = rich)))} else {print(kruskal.test(rich$alpha_diversity$Shannon, rich$Sex))}
+
+if (shapiro.test(rich$alpha_diversity[["InvSimpson"]])$p.value > 0.05)
+{print(summary(aov(rich$alpha_diversity[["InvSimpson"]]~rich$Sex, data = rich)))} else {print(kruskal.test(rich$alpha_diversity$InvSimpson, rich$Sex))}
+
+# Habitat type
+if (shapiro.test(rich$alpha_diversity[["Chao1"]])$p.value > 0.05)
+{print(t.test(rich$alpha_diversity[["Chao1"]]~rich$Habitat, data = rich))} else {print(wilcox.test(alpha_diversity$Chao1 ~ Habitat, data=rich))}
+
+if (shapiro.test(rich$alpha_diversity[["Shannon"]])$p.value > 0.05)
+{print(t.test(rich$alpha_diversity[["Shannon"]]~rich$Habitat, data = rich))} else {print(wilcox.test(alpha_diversity$Shannon ~ Habitat, data=rich))}
+
+if (shapiro.test(rich$alpha_diversity[["InvSimpson"]])$p.value > 0.05)
+{print(t.test(rich$alpha_diversity[["InvSimpson"]]~rich$Habitat, data = rich))} else {print(wilcox.test(alpha_diversity$InvSimpson ~ Habitat, data=rich))}
+```
+
+Pairwise testing for significant results using Dunn's test with Benjamini-Hochberg adjustment
+
+```{r  results=F, message=F, warning=F}
+library(dunn.test); packageVersion("dunn.test")
+```
+```{r}
+dunn.test(rich$alpha_diversity$Shannon, rich$Location, method = "bh")
+
+dunn.test(rich$alpha_diversity$InvSimpson, rich$Location, method = "bh")
+
+dunn.test(rich$alpha_diversity$InvSimpson, rich$`Supplemental feeding`, method = "bh")
+```
+
+Plot alpha-diversity
+
+```{r}
+library(Manu); packageVersion("Manu")
+takahe_pal <- c("#DD3C51", "#313657", "#51806a","#1F6683", "#83A552","#6C90B9","#E2939E", "#D1C7B5")
+
+#p-values from Dunn's tests
+annotation_df_shannon <- data.frame(start=c("Burwood Centre", "Burwood Centre","Burwood Centre"), 
+                            end=c("Cape Sanctuary", "Foveaux Strait Is", "Murchison Mountain"),
+                            y=c(4.6, 5.1,5.6),
+                            label=c("0.03*", "0.02*","0.04*"))
+
+annotation_df_simpson <- data.frame(start=c("Burwood Centre", "Burwood Centre","Burwood Centre", "Burwood Centre"), 
+                            end=c("Cape Sanctuary", "Foveaux Strait Is", "Murchison Mountain", "Tiritiri Matangi Is"),
+                            y=c(34,40,46,52),
+                            label=c("0.04*", "0.02*","0.008**","0.03*"))
+
+
+myadptheme <- theme_ipsum() + theme(plot.title = element_text(size = 26),
+  
+          plot.subtitle = element_text(size = 24),
+          
+          axis.text.x = element_blank(),
+
+          axis.title.x = element_text(size=35),
+
+          axis.ticks.x = element_blank(),
+
+          axis.text.y=element_text(size=25),
+
+          axis.title.y=element_text(size=35),
+
+          axis.line.x=element_line(color="black",size=1.0,linetype=1),
+
+          axis.line.y=element_line(color="black",size=1.0,linetype=1),
+
+          panel.grid.major = element_blank(),
+
+          panel.grid.minor = element_blank(),
+
+          panel.background = element_blank(),
+
+          legend.box.background = element_rect(),
+
+          legend.box.margin = margin(5, 5, 5, 5),
+
+          legend.position="bottom",
+
+          legend.title = element_text(face = "bold", size = 35),
+          
+          legend.text = element_text(size = 30))
+
+rich_df <- as.data.frame(rich)
+names(rich_df)[names(rich_df) == "alpha_diversity.Chao1"] <- "Chao1"
+names(rich_df)[names(rich_df) == "alpha_diversity.Shannon"] <- "Shannon"
+names(rich_df)[names(rich_df) == "alpha_diversity.InvSimpson"] <- "InvSimpson"
+```
+
+###Location
+```{r fig.cap="Alpha diversity of the takah\u113 gut microbiota",  fig.height = 10, fig.width = 15, dpi=300}
+chao1 <- ggplot(rich_df, aes(x=Location, y=Chao1))  
+chao1.plot <- chao1 + geom_boxplot(size=1.0, aes(fill=Location)) +   
+            myadptheme + theme(plot.title = element_text(size = 35)) +
+            scale_fill_manual(values = takahe_pal) +
+            labs(y = "Chao1 richness", x = "Location") +
+            ggtitle("ANOVA p = 0.05")
+chao1.plot 
+
+
+shannon <- ggplot(rich_df, aes(x=Location, y=Shannon))  
+shannon.plot <- shannon + geom_boxplot(size=1.0, aes(fill=Location)) +   
+            myadptheme + theme(plot.title = element_text(size = 35)) +
+            scale_y_continuous(limits = c(0,6)) +
+            scale_fill_manual(values = takahe_pal) +
+            labs(y = "Shannon diversity", x = "Location") +
+            ggtitle("Kruskal-Wallis p = 0.01*") + 
+            geom_signif(data=annotation_df_shannon,aes(xmin=start, xmax=end, annotations=label, y_position=y),
+              manual=TRUE, tip_length = 0, textsize = 8, colour = "blue") 
+shannon.plot
+
+
+simpson <- ggplot(rich_df, aes(x=Location, y=InvSimpson))
+simpson.plot <- simpson + geom_boxplot(size=1.0, aes(fill=Location)) +   
+            myadptheme + theme(plot.title = element_text(size = 35)) +
+            scale_fill_manual(values = takahe_pal) +
+            labs(y = "Inverse Simpson diversity", x = "Location") +
+            ggtitle("Kruskal-Wallis p = 0.007**") + 
+            geom_signif(data=annotation_df_simpson,aes(xmin=start, xmax=end, annotations=label, y_position=y),
+              manual=TRUE, tip_length = 0, textsize = 8, colour = "blue") 
+simpson.plot
+```
+
+```{r fig.height=10, fig.width=25}
+library(ggpubr)
+location.adp <- ggarrange(chao1.plot, shannon.plot, simpson.plot, labels = c("A"), font.label = list(size = 30),
+          ncol=3, nrow=1, common.legend = T , legend = "bottom")
+
+location.adp
+```
+
+###Supplemental Feeding
+
+```{r fig.cap = "Alpha Diversity measures in the takah\u113 gut microbiota by supplemental feeding", fig.height = 10, fig.width = 15, dpi=300}
+annoSF_simpson <- data.frame(start=c("None"), 
+                            end=c("Regular"),
+                            y=c(50),
+                            label=c("0.003**"))
+
+f_eight <- c("#FF6F00BF", "#C71000BF", "#008EA0BF", "#8A4198BF", "#FF6348BF", "#5A9599BF","#84D7E1BF", "#FF95A8BF")
+
+
+chao1SF <- ggplot(rich_df, aes(x=Supplemental.feeding, y=Chao1))  
+chao1SF.plot <- chao1SF + geom_boxplot(size=1.0, aes(fill=Supplemental.feeding)) +   
+            myadptheme + theme(plot.title = element_text(size = 35)) +
+            scale_fill_manual(values = f_eight, name = "Supplemental feeding") +
+            labs(y = "Chao1 richness", x = "Supplemental feeding") +
+            ggtitle("ANOVA p = 0.6")
+chao1SF.plot
+
+
+shannonSF <- ggplot(rich_df, aes(x=Supplemental.feeding, y=Shannon))  
+shannonSF.plot <- shannonSF + geom_boxplot(size=1.0, aes(fill=Supplemental.feeding)) + 
+            myadptheme + theme(plot.title = element_text(size = 35)) +
+            scale_fill_manual(values = f_eight, name = "Supplemental feeding") +
+            labs(y = "Shannon diversity", x = "Supplemental feeding") +
+            ggtitle("Kruskal-Wallis p = 0.06")
+shannonSF.plot
+
+simpsonSF <- ggplot(rich_df, aes(x=Supplemental.feeding, y=InvSimpson))  
+simpsonSF.plot <- simpsonSF + geom_boxplot(size=1.0, aes(fill=Supplemental.feeding)) +  
+              myadptheme + theme(plot.title = element_text(size = 35)) +
+              scale_fill_manual(values = f_eight, name = "Supplemental feeding") +
+              labs(y = "Inverse Simpson diversity", x = "Supplemental feeding") +
+              ggtitle("Kruskal-Wallis p = 0.009**") +
+              geom_signif(data=annoSF_simpson,aes(xmin=start, xmax=end, annotations=label, y_position=y),
+              manual=TRUE, tip_length = 0, textsize = 8, colour = "blue") 
+simpsonSF.plot
+
+```
+
+```{r fig.height=10, fig.width=25}
+SF.adp <- ggarrange(chao1SF.plot, shannonSF.plot, simpsonSF.plot, labels = c("B"), font.label = list(size = 30),
+          ncol=3, nrow=1, common.legend = T , legend = "bottom")
+
+SF.adp
+```
+
+###Habitat
+```{r fig.cap = "Alpha Diversity measures in the takah\u113 gut microbiota by habitat type", fig.height = 10, fig.width = 15, dpi=300}
+chao1.H <- ggplot(rich_df, aes(x=Habitat, y=Chao1))  
+chao1.H.plot <- chao1.H + geom_boxplot(size=1.0, aes(fill=Habitat)) +   
+            myadptheme + theme(plot.title = element_text(size = 35)) +
+            scale_fill_manual(values = c("#5A9599BF","#84D7E1BF")) +
+            labs(y = "Chao1 richness", x = "Habitat") +
+            ggtitle("ANOVA p = 0.002**")
+
+shannon.H <- ggplot(rich_df, aes(x=Habitat, y=Shannon))  
+shannon.H.plot <- shannon.H + geom_boxplot(size=1.0, aes(fill=Habitat)) +   
+            myadptheme + theme(plot.title = element_text(size = 35)) +
+            scale_fill_manual(values = c("#5A9599BF","#84D7E1BF")) +
+            labs(y = "Shannon diversity", x = "Habitat") +
+            ggtitle("Wilcoxon p = 0.05")
+
+
+simpson.H <- ggplot(rich_df, aes(x=Habitat, y=InvSimpson))  
+simpson.H.plot <- simpson.H + geom_boxplot(size=1.0, aes(fill=Habitat)) +   
+            myadptheme + theme(plot.title = element_text(size = 35)) +
+            scale_fill_manual(values = c("#5A9599BF","#84D7E1BF")) +
+            labs(y = "Inverse Simpson diversity", x = "Habitat") +
+            ggtitle("Wilcoxon p = 0.1")
+```
+
+```{r fig.height=10, fig.width=25}
+Habitat.adp <- ggarrange(chao1.H.plot, shannon.H.plot, simpson.H.plot, labels = c("C"), font.label = list(size = 30),
+          ncol=3, nrow=1, common.legend = T , legend = "bottom")
+
+Habitat.adp
+```
+
+```{r results=F, message=F, warning=F}
+library(cowplot)
+```
+
+```{r fig.height = 30, fig.width = 25}
+adp_all_together = ggarrange(location.adp, NULL, SF.adp, NULL, Habitat.adp, ncol = 1, nrow = 5, heights = c(1,0.2,1,0.2,1))
+adp_all_together
+
+ggsave("alphadiv_together.png", adp_all_together, height = 30, width = 25, dpi = 400, bg= "white")
+```
+
+
+#Taxa plots
+
+Use plyr to create an 'Others' group based on mean abundance.
+
+```{r results=F, message=F, warning=F}
+library(plyr); packageVersion("plyr")
+```
+
+
+```{r}
+others <- transform_sample_counts(psR, function(x) x/sum(x))
+
+# agglomerate taxa
+glom <- tax_glom(others, taxrank = 'Phylum')
+
+# create dataframe from phyloseq object
+df <- psmelt(glom)
+
+# convert Phylum to a character vector
+df$Phylum <- as.character(df$Phylum)
+
+# group dataframe by Phylum, calculate mean rel. abundance
+means <- ddply(df, ~Phylum, function(x) c(mean=mean(x$Abundance)))
+
+st.dev <- ddply(df, ~Phylum, function(x) c(std=sd(x$Abundance)))
+
+# The code is creating a list of mean values for the condensed taxonomies across the data set.
+# It does not effect the actual abundances of each ASV within the taxa group (which is what you plot)
+# The list of mean values is then used to rename taxa whose mean is less than the value specified e.g. 0.001
+
+# find Phyla whose rel. abund. is less than 1%
+remainder <- means[means$mean <= 0.001,]$Phylum 
+
+# change name to "Others"
+df[df$Phylum %in% remainder,]$Phylum <- 'Other phyla <0.1%' 
+
+#Find how many colours are required
+print(levels(factor(df$Phylum)))
+```
+
+```{r}
+dir.create("taxaplots")
+
+taxa_theme <- theme_ipsum() + theme(axis.text.x = element_blank(),
+
+          axis.ticks.x = element_blank(),
+
+          axis.text.y=element_text(size=15),
+
+          axis.title.y=element_text(size=26),
+          
+          axis.title.x = element_text(size=26),
+          
+          strip.text.x = element_text(size = 22),
+
+          panel.grid.major = element_blank(),
+
+          panel.grid.minor = element_blank(),
+
+          panel.background = element_blank(),
+
+          legend.box.background = element_rect(),
+
+          legend.box.margin = margin(5, 5, 5, 5),
+
+          legend.position="bottom",
+
+          legend.title = element_text(face = "bold", size = 30),
+          
+          legend.text = element_text(size = 25))
+```
+
+
+```{r fig.cap = "Phylum-level taxonomy plot of the takah\u113 gut microbiota grouped by location", fig.height = 15, fig.width = 22, dpi=300}
+POplot <- ggplot(data=df, aes(x=Actual_Name, y=Abundance, fill = factor(Phylum, levels =  c("Acidobacteriota","Actinobacteriota","Bacteroidota","Campilobacterota","Firmicutes","Fusobacteriota","Planctomycetota","Proteobacteria","Verrucomicrobiota","Other phyla <0.1%"))))
+
+phylum_plot <- POplot + geom_bar(aes(), stat="identity", position="stack") + 
+  
+  guides(fill=guide_legend(title="Phylum")) +
+  
+  scale_fill_futurama(alpha=0.75) +
+  
+  taxa_theme +
+  
+  labs(x="Individual faecal samples", y="Relative sequence abundance") + 
+  
+  facet_grid(~Location, scales = "free_x", space = "free" ,labeller = labeller(Location = label_wrap_gen(11)))
+   
+phylum_plot
+ggsave("./taxaplots/phylum_plot.png", plot = phylum_plot, width = 22, height = 15, dpi = 400, bg = "white")
+```
+
+By Supplemental feeding
+```{r fig.cap = "Phylum-level taxonomy plot of the takah\u113 gut microbiota grouped by supplemental feeding", fig.height = 15, fig.width = 22, dpi=300}
+phylum_plotSF <- POplot + geom_bar(aes(), stat="identity", position="stack")  + 
+  
+  guides(fill=guide_legend(title="Phylum")) +
+
+  taxa_theme +  labs(x="Inidividual faecal sample", y="Relative sequence abundance") + 
+  
+  facet_grid(~Supplemental_feeding, scales = "free_x", space = "free") +
+  
+  scale_fill_futurama(alpha=0.75) 
+
+phylum_plotSF
+ggsave("./taxaplots/phylum_plotSF.png", plot = phylum_plotSF, width = 22, height = 15, dpi = 400, bg = "white")
+```
+
+Genus level taxonomic plots.
+
+```{r}
+glomG <- tax_glom(others, taxrank = 'Genus')
+
+dfG <- psmelt(glomG)
+
+dfG$Genus <- as.character(dfG$Genus)
+
+meansG <- ddply(dfG, ~Genus, function(x) c(mean=mean(x$Abundance)))
+
+remainderG <- meansG[meansG$mean <= 0.01,]$Genus
+
+dfG[dfG$Genus %in% remainderG,]$Genus <- 'Other genera <1%'
+
+print(levels(factor(dfG$Genus)))
+```
+
+```{r fig.cap = "Genus-level taxonomic plot of the takah\u113 gut microbiota", fig.height = 15, fig.width = 22, dpi=300}
+taxa.colours.list.2021 <-  c("#882E72","#B178A6","#D6C1DE","#1965B0","#5289C7","#7BAFDE","#4EB265","#CAE0AB","#F7EE55","#F6C141","#E8601C","#DC050C","#FF0F39","#FF99AB","#ECD3D8","#B1B1B1","#767676","#54809D","#77b6b1","#33605d")
+
+GOplot <- ggplot(data=dfG, aes(x=Actual_Name, y=Abundance,  fill = factor(Genus, levels =  c("Actinobacillus","Anaerobiospirillum","Bacteroides","Bifidobacterium","Campylobacter","Catellicoccus","Clostridium sensu stricto 1","Dialister","Escherichia-Shigella","Fusobacterium","Lachnospiraceae NK3A20 group","Lactobacillus","Megamonas","Prevotella","Pseudomonas","Solobacterium","Sutterella","Turicibacter","Ureaplasma","Other genera <1%"))))
+
+
+Genus_plot <- GOplot + geom_bar(aes(), stat="identity", position="fill")  + 
+  
+  guides(fill=guide_legend(title="Genus")) + 
+  
+  taxa_theme +
+  
+  labs(x="Individual faecal samples", y="Relative sequence abundance") +  
+  
+  facet_grid(~Location, scales = "free_x", space = "free" ,labeller = labeller(Location = label_wrap_gen(11))) +
+  
+  scale_fill_manual(values = taxa.colours.list.2021)
+
+Genus_plot
+ggsave("./taxaplots/Genus_taxa_plot_nonsorted.png", height = 15, width = 22, dpi=400, bg = "white")
+```
+
+Reorder samples by Lactobacillus abundance
+
+```{r results=F, message=F, warning=F}
+library(RDCOMClient) 
+lapply(names(sessionInfo()$otherPkgs), function(pkgs)
+  detach(
+    paste0('package:', pkgs),
+    character.only = T,
+    unload = T,
+    force = T
+  ))
+```
+
+```{r results=F, message=F, warning=F}
+library(dplyr)
+library(tidyverse); packageVersion("tidyverse")
+```
+
+
+```{r, results='hide'}
+dfG %>% 
+  group_by(SampleID) %>% 
+  summarise(Sum = sum(Abundance)) %>% 
+  arrange(Sum) %>% 
+  print(n = Inf)
+
+library(forcats); packageVersion("forcats")
+
+dfG_reorder <- dfG 
+
+dfG_reorder$SampleID_new <- 
+  as.character(dfG_reorder$SampleID)
+
+SampleID_new_levels <-
+  dfG_reorder %>%
+  filter(Genus == "Lactobacillus")  %>%
+  group_by(SampleID_new)%>% 
+  summarise(Sum = sum(Abundance)) %>%
+  arrange(Sum) %>%
+  pull(SampleID_new) %>%
+  unique
+
+dfG_reorder$SampleID_new <-
+  factor(dfG_reorder$SampleID_new,
+         levels = SampleID_new_levels)
+```
+
+```{r results=F, message=F, warning=F}
+library(phyloseq)
+library(ggplot2)
+library(hrbrthemes)
+```
+
+
+```{r fig.cap = "Genus-level taxonomic plot ordered by relative abundance of Lactobacillus", fig.height = 15, fig.width = 22, dpi=300}
+LactoGOplot <- ggplot(data=dfG_reorder, aes(x=SampleID_new, y=Abundance, fill = factor(Genus, levels =  c("Actinobacillus","Anaerobiospirillum","Bacteroides","Bifidobacterium","Campylobacter","Catellicoccus","Clostridium sensu stricto 1","Dialister","Escherichia-Shigella","Fusobacterium","Lachnospiraceae NK3A20 group","Lactobacillus","Megamonas","Prevotella","Pseudomonas","Solobacterium","Sutterella","Turicibacter","Ureaplasma","Other genera <1%"))))
+
+LactoGO_plot <- LactoGOplot + geom_bar(aes(), stat="identity", position="fill") +
+  
+  guides(fill=guide_legend(title="Genus")) + 
+  
+  taxa_theme +
+  
+  labs(x="Individual faecal samples", y="Relative sequence abundance") +  
+  
+  facet_grid(~Location, scales = "free_x", space = "free",labeller = labeller(Location = label_wrap_gen(11))) +
+  
+  scale_fill_manual(values = taxa.colours.list.2021)
+
+LactoGO_plot
+ggsave("./taxaplots/LactoGO_plot.png",width = 22,height = 15, dpi = 400, bg = "white")
+```
+
+By Supplemental feeding
+
+```{r fig.cap = "Genus-level taxonomic plot ordered by relative abundance of Lactobacillus grouped by supplemental feeding", fig.height = 12, fig.width = 22, dpi=300}
+LactoGO_SF_plot <- LactoGOplot + geom_bar(aes(), stat="identity", position="fill")  + 
+  
+  guides(fill=guide_legend(title="Genus")) + 
+  
+  taxa_theme +
+  
+  labs(x="Individual faecal samples", y="Relative sequence abundance") +  
+  
+  facet_grid(~Supplemental_feeding, scales = "free_x", space = "free") +
+  
+  scale_fill_manual(values = taxa.colours.list.2021)
+
+
+LactoGO_SF_plot
+ggsave("./taxaplots/LactoGO_SF_plot.png",width = 22,height = 15, dpi=400, bg = "white")
+```
+
+```{r fig.height=25, fig.width=18}
+library(cowplot)
+taxa_together <- plot_grid(phylum_plot, Genus_plot, labels = c("A","B"), label_size = 30, ncol=1)
+taxa_together
+ggsave("taxa_together.png", taxa_together, height = 25, width = 24, dpi=400)
+```
+
+
+
+#Beta Diversity
+
+##BrayCurtis nMDS
+```{r}
+library(ggtext)
+
+ord_theme = theme_ipsum() + 
+  theme(plot.title = element_markdown(size = 35, margin=margin(0,0,30,0)),
+    
+    axis.title.x = element_text(size=35),
+    
+    axis.title.y =element_text(size=35),
+
+    axis.line.x=element_line(color="black",size=0.5,linetype=1),
+
+    axis.line.y=element_line(color="black",size=0.5,linetype=1),
+
+    panel.grid.major = element_blank(),
+
+    panel.grid.minor = element_blank(),
+
+    panel.background = element_blank(),
+
+    legend.text = element_markdown(size=25),
+    
+    legend.title = element_markdown(face="bold", size = 30),
+    
+    legend.position = "top") 
+```
+
+
+```{r}
+library(vegan)
+psR_RA <- transform_sample_counts(psRT, function(x) {x/sum(x)})
+otu_RA <- data.frame(otu_table(psR_RA))
+psRA.dist <- vegdist(otu_RA, method="bray",
+                    binary=FALSE, diag=FALSE, upper=FALSE,
+                    na.rm=FALSE)
+
+bray.nmds.ord <- metaMDS(psRA.dist)
+
+bray.nmds.ord #0.17 stress
+
+nmds.data <- as.data.frame(scores(bray.nmds.ord))
+
+nmds.data$Location <- map$Location
+nmds.data$Supplemental_feeding <- map$Supplemental_feeding
+nmds.data$Habitat <- map$Habitat
+nmds.data$Lactobacillus <- map$Lactobacillus
+```
+
+```{r fig.cap = "Bray Curtis PCoA plot on takah\u113 ASV sequence data by location and Lactobacillus abundance", fig.height = 12, fig.width = 18, dpi=300}
+#dir.create("ordinations")
+
+nmds.lactob <- ggplot() +
+  geom_point(data=nmds.data, aes(x = NMDS1, y = NMDS2, color = Lactobacillus, shape=Location), size=7, stroke = 2) +
+  geom_vline(xintercept = 0, linetype = "dashed") + 
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  scale_shape_manual(values=c(15:17,21:25)) +
+  ord_theme + theme(legend.box = "vertical") + 
+  guides(shape = guide_legend(order = 1)) +
+  scale_color_gradient(low = "blue", high = "red", name="*Lactobacillus* abundance",
+                       labels=c("Low","High"),breaks=c(1000,5300), guide = "colourbar") +
+ 
+  ggtitle("Bacterial communities by *Lactobacillus* abundance")
+
+nmds.lactob
+ggsave("./ordinations/bray_pcoa_plot_revised_OCT2021.png", width = 18, height = 12, dpi = 400, bg = "white")
+```
+
+
+```{r fig.cap = "Bray Curtis PCoA plot on takah\u113 ASV sequence data by supplemental feeding", fig.height = 12, fig.width = 18, dpi=300}
+f_eight <- c("#FF6F00BF", "#C71000BF", "#008EA0BF", "#8A4198BF", "#FF6348BF", "#5A9599BF","#84D7E1BF", "#FF95A8BF")
+
+nmds.SF <- ggplot() +
+  geom_point(data=nmds.data, aes(x = NMDS1, y = NMDS2, color = Supplemental_feeding, shape=Location), size=7, stroke = 2) +
+  geom_vline(xintercept = 0, linetype = "dashed") + 
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  scale_shape_manual(values=c(15:17,21:25)) +
+  ord_theme + theme(legend.box = "vertical") + 
+  guides(shape = guide_legend(order = 1)) +
+  scale_color_manual(values = f_eight, name="Supplemental feeding") +
+  ggtitle("Bacterial communities by supplemental feeding")
+
+nmds.SF
+```
+
+
+```{r fig.cap = "Bray Curtis PCoA plot on takah\u113 ASV sequence data by habitat type", fig.height = 12, fig.width = 18, dpi=300}
+nmds.Habitat <- ggplot() +
+  geom_point(data=nmds.data, aes(x = NMDS1, y = NMDS2, color = Habitat, shape=Location), size=7, stroke = 2) +
+  geom_vline(xintercept = 0, linetype = "dashed") + 
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  scale_shape_manual(values=c(15:17,21:25)) +
+  ord_theme + theme(legend.box = "vertical") + 
+  guides(shape = guide_legend(order = 1)) +
+  scale_color_manual(values = c("#5A9599BF","#84D7E1BF"), name="Habitat") +
+  ggtitle("Bacterial communities by habitat")
+
+nmds.Habitat
+```
+
+```{r fig.height=25, fig.width=18}
+library(cowplot)
+nmds.SF.HB <- plot_grid(nmds.SF, nmds.Habitat, ncol = 1, nrow = 2, labels = c("A","B"), label_size = 30)
+nmds.SF.HB
+
+ggsave("./ordinations/nmds_sf_hb_together.jpg", nmds.SF.HB, height = 25, width = 18, dpi = 300, bg = "white")
+```
+
+
+##gUniFrac PCoA
+
+```{r results=F, message=F, warning=F}
+library(GUniFrac); packageVersion("GUniFrac")
+library(phangorn); packageVersion("phangorn")
+library(ggplot2)
+library(vegan)
+```
+
+```{r, results='hide'}
+rASV.unif <- as.data.frame(rASV)
+rASV.unif = rASV.unif[,order(colSums(rASV.unif),decreasing = T)]
+gunifrac.tree <- midpoint(phy_tree(psRT))
+gunifracs <- GUniFrac(rASV.unif, gunifrac.tree,  alpha=c(0,0.5,1))$unifracs
+
+d5 <- gunifracs[, , "d_0.5"]
+d5.dist <- as.dist(d5)
+
+pcoa_guniF<-cmdscale(d5, k=2, eig=T)
+pcoa.var.per<-round(pcoa_guniF$eig/sum(pcoa_guniF$eig)*100, 1)
+pcoa.values <- pcoa_guniF$points
+pcoa.data <- data.frame(Sample=rownames(pcoa.values),
+                        X=pcoa.values[,1],
+                        Y=pcoa.values[,2])
+
+pcoa.data$Location <- map$Location
+pcoa.data$Supplemental_feeding <- map$Supplemental_feeding
+pcoa.data$Sex <- map$Sex
+pcoa.data$Lactobacillus <- map$Lactobacillus
+```
+
+Rename ASV sequences and create taxonomic vectors
+```{r}
+Ntaxa.df.unif <- as.data.frame(Ntaxa)
+to.remove = setdiff(rownames(Ntaxa.df.unif), colnames(rASV.unif))
+Ntaxa.df.unif = Ntaxa.df.unif[!row.names(Ntaxa.df.unif) %in% to.remove,]
+setdiff(rownames(Ntaxa.df.unif), colnames(rASV.unif))
+
+identical(rownames(Ntaxa.df.unif), colnames(rASV.unif))
+Ntaxa.df.unif = Ntaxa.df.unif[colnames(rASV.unif),]
+identical(rownames(Ntaxa.df.unif), colnames(rASV.unif))
+
+Ntaxa.df.unif$ASV_ID <- paste("ASV", 1:nrow(Ntaxa.df.unif), sep="")
+Ntaxa.df.unif$concat = paste(Ntaxa.df.unif$ASV_ID, Ntaxa.df.unif$Taxonomy, sep = "_")
+rownames(Ntaxa.df.unif) = Ntaxa.df.unif$concat
+names(rASV.unif) = rownames(Ntaxa.df.unif)
+
+
+vec.sp<-envfit(pcoa_guniF$points , rASV.unif, perm=1000)
+vec.sp.df<-
+  as.data.frame(scores(vec.sp, "vectors"))
+vec.sp.df$species<-rownames(vec.sp.df)
+vec.sp.df.sig <- vec.sp.df[c(1:6), ]
+```
+
+```{r fig.cap = "takah\u113 gUniFrac PCoA plot by location with taxonomic vectors", fig.height = 10, fig.width = 18, dpi=300}
+library(ggrepel)
+
+GUFpcoa_vectors = ggplot(data=pcoa.data, aes(x = X, y = Y, colour = Location)) +
+  geom_point(size=5, stroke=2, alpha=0.75, aes(shape=Location)) +
+  xlab(paste("PCoA 1","[" ,pcoa.var.per[1], "%","]" ,sep=" ")) +
+  ylab(paste("PCoA 2","[" ,pcoa.var.per[2], "%","]" ,sep=" ")) + 
+  geom_vline(xintercept = 0, linetype = "dashed") + 
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  geom_segment(data=vec.sp.df.sig, 
+              aes(x=0,xend=Dim1,y=0,yend=Dim2),
+               arrow = arrow(length = unit(0.3, "cm")),
+               colour="red", size = 1,
+               inherit.aes=FALSE) + 
+ geom_text_repel(data=vec.sp.df.sig,
+            aes(x=Dim1,y=Dim2,label=species),size=6.5,
+            inherit.aes=FALSE, max.overlaps = Inf) +
+  scale_color_manual(values = takahe_pal) + 
+  scale_shape_manual(values=c(15:17,21:25)) +
+  ord_theme +
+  ylim(-0.50, 0.8) +  xlim(-0.44, 0.8) +
+  ggtitle("ASV vectors for ordinated faecal samples")
+
+GUFpcoa_vectors
+ggsave("./ordinations/pcoa_takahe_guniF_vectors.png", width = 18, height = 10, dpi = 400, bg = "white")
+```
+
+
+```{r fig.cap = "takah\u113 gUniFrac PCoA plot by location", fig.height = 10, fig.width = 18, dpi=300}
+GUFpcoa_location = ggplot(data=pcoa.data, aes(x = X, y = Y, colour = Location)) +
+  geom_point(size=7, stroke=2, alpha=0.75, aes(shape=Location)) +
+  xlab(paste("PCoA1 ","[", pcoa.var.per[1], "%", "]")) +
+  ylab(paste("PCoA2 ", "[",pcoa.var.per[2], "%", "]")) + 
+  geom_vline(xintercept = 0, linetype = "dashed") + 
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  scale_color_manual(values = takahe_pal) + 
+  scale_shape_manual(values=c(15:17,21:25)) +
+  ord_theme +
+  ggtitle("Bacterial communities by location")
+
+
+GUFpcoa_location
+ggsave("./ordinations/pcoa_takahe_guniF_location.png", width = 18, height = 10, bg = "white")
+```
+
+```{r fig.cap = "takah\u113 PCoA plot by lactobacillus abundance", fig.height = 10, fig.width = 18, dpi=300}
+GUFpcoa_lacto = ggplot(data=pcoa.data, aes(x = X, y = Y, colour = Lactobacillus)) +
+  geom_point(size=7, stroke=2, alpha=0.75, aes(shape=Location)) +
+  xlab(paste("PCoA1 ","[", pcoa.var.per[1], "%", "]")) +
+  ylab(paste("PCoA2 ", "[",pcoa.var.per[2], "%", "]")) + 
+  geom_vline(xintercept = 0, linetype = "dashed") + 
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  scale_color_gradient(low = "blue", high = "red", name="*Lactobacillus* abundance",
+                      labels=c("Low","High"),
+                       breaks=c(1000,5300)) +
+  scale_shape_manual(values=c(15:17,21:25)) +
+  ord_theme + theme(legend.box = "vertical") + 
+  guides(shape = guide_legend(order = 1)) +
+  ggtitle("Bacterial communities by *Lactobacillus* abundance")
+
+GUFpcoa_lacto
+ggsave("./ordinations/pcoa_takahe_guniF_lactobacillus.png", width = 18, height = 10, dpi=400, bg = "white")
+```
+
+```{r fig.height=30, fig.width=18}
+pcoa_together = plot_grid(GUFpcoa_location, GUFpcoa_lacto, GUFpcoa_vectors, labels = c("A","B","C"), label_size = 30, ncol=1)
+pcoa_together
+ggsave("GUFpcoa_together.png", pcoa_together, height = 30, width = 18, dpi = 400, bg = "white")
+```
+
+
+#PERMANOVA
+
+```{r}
+permanova.dis <- phyloseq::distance(psR_RA, "bray")
+
+vegan::adonis2(permanova.dis ~ Location, as(sample_data(psR_RA), "data.frame"), permutations = 9999)
+
+vegan::adonis2(permanova.dis ~ Supplemental_feeding + Location, by = "margin", as(sample_data(psR_RA), "data.frame"), permutations = 9999)
+
+vegan::adonis2(permanova.dis ~ Supplemental_feeding + Location, by = "term", as(sample_data(psR_RA), "data.frame"), permutations = 9999)
+
+vegan::adonis2(permanova.dis ~ Habitat + Location, by='term', as(sample_data(psR_RA), "data.frame"), permutations = 9999)
+
+vegan::adonis2(permanova.dis ~ Habitat + Location, by='margin', as(sample_data(psR_RA), "data.frame"), permutations = 9999)
+```
+
+```{r}
+vegan::adonis2(permanova.dis ~ Supplemental_feeding, as(sample_data(psR_RA), "data.frame"), permutations = 9999)
+vegan::adonis2(permanova.dis ~ Habitat, as(sample_data(psR_RA), "data.frame"), permutations = 9999)
+vegan::adonis2(permanova.dis ~ Hatch_Site, as(sample_data(psR_RA), "data.frame"), permutations = 9999) #hatch site has very uneven group sizes
+vegan::adonis2(permanova.dis ~ Nest_Site, as(sample_data(psR_RA), "data.frame"), permutations = 9999)
+vegan::adonis2(permanova.dis ~ Sex, as(sample_data(psR_RA), "data.frame"), permutations = 9999)
+vegan::adonis2(permanova.dis ~ Age, as(sample_data(psR_RA), "data.frame"), permutations = 9999)
+vegan::adonis2(permanova.dis ~ Natal.Year, as(sample_data(psR_RA), "data.frame"), permutations = 9999)
+vegan::adonis2(permanova.dis ~ Origin, as(sample_data(psR_RA), "data.frame"), permutations = 9999)
+```
+
+```{r}
+vegan::adonis2(as.dist(d5) ~ Location, map, permutations = 9999)
+
+vegan::adonis2(as.dist(d5) ~ Supplemental_feeding + Location, by = "margin", map, permutations = 9999)
+
+vegan::adonis2(as.dist(d5) ~ Supplemental_feeding + Location, by = "term",map, permutations = 9999)
+
+vegan::adonis2(as.dist(d5) ~ Supplemental_feeding, map, permutations = 9999)
+vegan::adonis2(as.dist(d5) ~ Habitat, map, permutations = 9999)
+vegan::adonis2(as.dist(d5) ~ Hatch_Site, map, permutations = 9999) #hatch site has very uneven group sizes
+vegan::adonis2(as.dist(d5) ~ Nest_Site, map, permutations = 9999)
+vegan::adonis2(as.dist(d5) ~ Sex, map, permutations = 9999)
+vegan::adonis2(as.dist(d5) ~ Age, map, permutations = 9999)
+vegan::adonis2(as.dist(d5) ~ Natal.Year, map, permutations = 9999)
+vegan::adonis2(as.dist(d5) ~ Origin, map, permutations = 9999)
+```
+
+Pairwise PERMANOVA with Benjamini-Hochberg adjustment
+
+```{r results=F, message=F, warning=F}
+library(pairwiseAdonis); packageVersion("pairwiseAdonis")
+library(permute)
+```
+
+
+```{r}
+pairwiseAdonis::pairwise.adonis(permanova.dis, factors = map$Location, p.adjust.m = 'BH')
+pairwiseAdonis::pairwise.adonis(as.dist(d5), factors = map$Location, p.adjust.m = 'BH')
+```
+
+Check that any significance detected in PERMANOVA is not due to uneven dispersion between groups.
+
+```{r fig.height = 10, fig.width = 15, dpi=300}
+beta <- vegan::betadisper(permanova.dis, map$Location)
+beta
+vegan::permutest(beta, permutations = how(nperm = 9999))
+
+beta2 <- vegan::betadisper(as.dist(d5), map$Location)
+beta2
+vegan::permutest(beta2, permutations = how(nperm = 9999))
+```
+
+Exploring supplemental feeding and habitat type
+
+```{r fig.height = 10, fig.width = 15, dpi=300}
+pairwiseAdonis::pairwise.adonis(permanova.dis, factors = map$Supplemental_feeding, p.adjust.m = 'BH')
+pairwiseAdonis::pairwise.adonis(as.dist(d5), factors = map$Supplemental_feeding, p.adjust.m = 'BH')
+```
+
+Remove smaller 'occasional' group
+
+```{r}
+new_psR_SF = subset_samples(psR, SampleID != "Moehau" & SampleID != "Puti" & SampleID != "Tamahine" & SampleID != "Tautari")
+metadata_SF <- as(sample_data(new_psR_SF), "data.frame")
+permanova.dis_SF <- phyloseq::distance(new_psR_SF, "bray")
+vegan::adonis2(permanova.dis_SF ~ Supplemental_feeding, as(sample_data(new_psR_SF), "data.frame"), permutations = 9999)
+
+
+psRT_SF = subset_samples(psRT, SampleID != "Moehau" & SampleID != "Puti" & SampleID != "Tamahine" & SampleID != "Tautari")
+rASV.unif.SF <- as.data.frame(otu_table(psRT_SF))
+rASV.unif.SF = rASV.unif.SF[,order(colSums(rASV.unif.SF),decreasing = T)]
+gunifrac.tree.SF <- midpoint(phy_tree(psRT_SF))
+gunifracs.SF <- GUniFrac(rASV.unif.SF, gunifrac.tree.SF,  alpha=c(0,0.5,1))$unifracs
+
+d5.SF <- gunifracs.SF[, , "d_0.5"]
+d5.dist.SF <- as.dist(d5.SF)
+map.sf <- data.frame(sample_data(psRT_SF))
+vegan::adonis2(d5.dist.SF ~ Supplemental_feeding, map.sf, permutations = 9999)
+
+```
+
+```{r}
+betaSF <- vegan::betadisper(permanova.dis, map$Supplemental_feeding)
+betaSF
+vegan::permutest(betaSF, permutations = how(nperm = 9999))
+
+betaSF <- vegan::betadisper(permanova.dis_SF, metadata_SF$Supplemental_feeding)
+betaSF
+vegan::permutest(betaSF, permutations = how(nperm = 9999))
+
+betaSF2 <- vegan::betadisper(as.dist(d5), map$Supplemental_feeding)
+betaSF2
+vegan::permutest(betaSF2, permutations = how(nperm = 9999))
+
+betaSF2 <- vegan::betadisper(d5.dist.SF, map.sf$Supplemental_feeding)
+betaSF2
+vegan::permutest(betaSF2, permutations = how(nperm = 9999))
+```
+
+```{r}
+betaH <- vegan::betadisper(permanova.dis, map$Habitat)
+betaH
+vegan::permutest(betaH, permutations = how(nperm = 9999))
+
+betaH2 <- vegan::betadisper(as.dist(d5), map$Habitat)
+betaH2
+vegan::permutest(betaH2, permutations = how(nperm = 9999))
+```
+
+
+#Compare core genera relative sequence abundance between locations
+
+```{r results=F, message=F, warning=F}
+library(ggplot2)
+library(ape); packageVersion("ape")
+library(microbiome)
+library(dplyr)
+library(vegan); packageVersion("vegan")
+library(phyloseq)
+library(reshape2); packageVersion("reshape2")
+library(ggpubr)
+```
+
+```{r}
+ps.bxa <- psR
+taxic <- as.data.frame(ps.bxa@tax_table) 
+taxic$OTU <- row.names(taxic)
+taxmat <- as.matrix(taxic)
+# convert into phyloseq compaitble file.
+new.tax <- tax_table(taxmat)  
+tax_table(ps.bxa) <- new.tax 
+pseq.fam.bx <- microbiome::aggregate_rare(ps.bxa,level = "Genus",detection = 0.01/100,prevalence = 75/100) 
+
+metadf1 <- map
+# create comaprision
+lev1 <- levels(as.factor(metadf1$Location)) # identify the grouping variable you want to compare between
+# make a pairwise list that we want to compare.
+L.pairs1 <- combn(seq_along(lev1), 2, simplify = FALSE, FUN = function(i)lev1[i])
+pseq.famrel.bx <- microbiome::transform(pseq.fam.bx, "compositional") #compositional is relative abundace
+ps.bx.m <- psmelt(pseq.famrel.bx)
+ps.bx.m.sub <- subset(ps.bx.m, OTU != "Other" & OTU != "Unclassified")
+```
+
+```{r}
+compare.mean <- compare_means(formula = Abundance ~ Location,group.by = "OTU", data=ps.bx.m.sub,p.adjust.method = "BH", method = "kruskal.test")
+compare.mean 
+
+write.csv(compare.mean, "./core/compare.means.csv")
+
+genus.p.df <- compare_means(formula = Abundance ~ Location,group.by = "OTU", data=ps.bx.m, method = "kruskal.test")
+genus.p.df
+```
+
+```{r results=F, message=F, warning=F}
+library(hrbrthemes)
+library(extrafont); packageVersion("extrafont")
+```
+     
+                                                                                
+```{r fig.cap = "Differential abundance of core genera between locations",fig.width=15, fig.height=15}
+labels = c(paste('Bacteroides\np = 0.01*'),
+           paste("Bifidobacterium\np < 0.001***"),
+           paste("Campylobacter\np = 0.23"),
+           paste("Clostridium sensu stricto 1\np = 0.02*"),
+           paste("Lactobacillus\np = 0.002**"),
+           paste("Prevotella\np = 0.002**"),
+           paste("Pseudomonas\np = 0.13"),
+           paste("Solobacterium\np = 0.004**"))
+
+ps.bx.m.sub$OTU <- factor(ps.bx.m.sub$OTU, levels = c("Bacteroides", "Bifidobacterium", "Campylobacter","Clostridium sensu stricto 1", "Lactobacillus", "Prevotella", "Pseudomonas","Solobacterium"), 
+                          labels = labels)
+
+ps.bx.m.sub$Location = as.factor(ps.bx.m.sub$Location)
+  
+px2 <- ggboxplot(ps.bx.m.sub, x = "Location", y = "Abundance", 
+                 add = "dotplot", 
+                 fill = "Location", 
+                 palette = c("#DD3C51", "#313657", "#51806a","#1F6683", "#83A552","#6C90B9","#E2939E", "#D1C7B5"), 
+                 ylab = "Relative sequence abundance") + scale_y_log10() + 
+  theme_ipsum() + theme(axis.text.x = element_blank(),
+
+          axis.ticks.x = element_blank(),
+
+          axis.title.y=element_text(size=23),
+          
+          axis.title.x = element_text(size=23),
+          
+          strip.text.x = element_text(size = 23),
+
+          axis.ticks.y = element_line(color="black",size=0.35,linetype=1),
+
+          axis.line.x=element_line(color="black",size=0.15,linetype=1),
+
+          axis.line.y=element_line(color="black",size=0.15,linetype=1),
+
+          panel.grid.major = element_blank(),
+
+          panel.grid.minor = element_blank(),
+
+          panel.background = element_blank(),
+
+          legend.box.background = element_rect(),
+
+          legend.box.margin = margin(5, 5, 5, 5),
+
+          legend.position="bottom",
+
+          legend.title = element_text(face = "bold", size = 25),
+          
+          legend.text = element_text(size = 23)) +
+  
+   facet_wrap(~OTU, scales = "free") 
+
+  
+px2
+ggsave("./core/genus_ASV_abundances_location_revised_OCT2021.png", width = 15, height = 15, dpi = 400)
+```
+
+#ASV differential abundance testing
+
+```{r results=F, message=F, warning=F}
+library(plyr); packageVersion("plyr")
+library(ggplot2); packageVersion("ggplot2")
+library(dplyr); packageVersion("dplyr")
+library(microbiome); packageVersion("microbiome")
+library(phyloseq); packageVersion("phyloseq")
+library(DESeq2); packageVersion("DESeq2")
+library(ggpubr); packageVersion("ggpubr")
+library(hrbrthemes); packageVersion("hrbrthemes")
+```
+
+```{r}
+my_theme <- theme_ipsum() + theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), axis.text.y = element_text(face="italic"))
+
+ps2.ASV.df = as.data.frame(otu_table(ps2))
+ps2.ASV.df = ps2.ASV.df[,order(colSums(ps2.ASV.df),decreasing = T)]
+ps2.taxa.df = as.data.frame(tax_table(ps2))
+
+identical(rownames(ps2.taxa.df), colnames(ps2.ASV.df))
+setdiff(rownames(ps2.taxa.df), colnames(ps2.ASV.df))
+ps2.taxa.df = ps2.taxa.df[colnames(ps2.ASV.df),]
+
+ps2.taxa.df$ASV_ID <- paste("ASV_", 1:nrow(ps2.taxa.df), sep="")
+ps2.taxa.df$concat = paste(ps2.taxa.df$ASV_ID, ps2.taxa.df$Taxonomy, sep = "_")
+rownames(ps2.taxa.df) = ps2.taxa.df$concat
+names(ps2.ASV.df) = rownames(ps2.taxa.df)
+
+ps2.taxa.df$ASV_ID = NULL
+ps2.taxa.df$concat = NULL
+ps2.taxa.df = as.matrix(ps2.taxa.df)
+
+ps2_edit <- phyloseq(otu_table(ps2.ASV.df, taxa_are_rows = F),
+                     tax_table(ps2.taxa.df),
+                     sample_data(map))
+ps2_edit
+```
+
+```{r}
+ps.sta <- ps2_edit
+sample_data(ps.sta)$Location <- revalue(sample_data(ps.sta)$Location, c("Burwood Centre" = "Burwood.Centre", "Cape Sanctuary" = "Cape.Sanctuary", "Foveaux Strait Is" = "Foveaux.Strait.Is", "Mana Island" = "Mana.Island", "Motutapu Island" = "Motutapu.Island", "Murchison Mountain" = "Murchison.Mountain", "Rotoroa Island" = "Rotoroa.Island", "Tiritiri Matangi Is" = "Tiritiri.Matangi.Is"))
+
+ps.st1.bc.mm.0 = subset_samples(ps.sta, Location != "Cape.Sanctuary" & Location != "Foveaux.Strait.Is" & Location != "Mana.Island" & Location != "Motutapu.Island" & Location != "Rotoroa.Island" & Location != "Tiritiri.Matangi.Is")
+head(sample_data(ps.st1.bc.mm.0)$Location, 10)
+ps.st1.bc.mm.0.1 = filter_taxa(ps.st1.bc.mm.0, function(x) sum(x > 3) > (0.05*length(x)), TRUE)
+ps.st1.bc.mm <- ps.st1.bc.mm.0.1
+```
+
+```{r}
+meta.st <- meta(ps.st1.bc.mm.0)
+meta.st$Location <- as.factor(meta.st$Location)
+diagdds_st.bc.mm = phyloseq_to_deseq2(ps.st1.bc.mm, ~ Location)
+ gm_mean = function(x, na.rm=TRUE){
+     exp(sum(log(x[x > 0]), na.rm=na.rm) / length(x))
+ }
+ geoMeans = apply(counts(diagdds_st.bc.mm), 1, gm_mean)
+ diagdds_st.bc.mm = estimateSizeFactors(diagdds_st.bc.mm, geoMeans = geoMeans)
+ dds_st.bc.mm = DESeq(diagdds_st.bc.mm, test="Wald", fitType="local")
+```
+
+```{r}
+otu.ab1 <- abundances(ps.st1.bc.mm)
+
+res1 = results(dds_st.bc.mm, cooksCutoff = FALSE)
+res_tax1 = cbind(as.data.frame(res1), as.matrix(rownames(otu.ab1)), OTU = rownames(res1))
+res_tax1 = cbind(as(res_tax1, "data.frame"), as(tax_table(ps.st1.bc.mm)[rownames(res_tax1), ], "matrix"))
+res_tax_sig1 = subset(res_tax1, padj < 0.01 & 0 < abs(log2FoldChange))
+res_tax1$Significant <- ifelse(rownames(res_tax1) %in% rownames(res_tax_sig1) , "Yes", "No")
+res_tax1$Significant[is.na(res_tax1$Significant)] <- "No"
+sig_res1 <- res_tax1[rownames(res_tax_sig1),"OTU"]
+res_table1 <- data.frame(res_tax_sig1$baseMean , res_tax_sig1$log2FoldChange,res_tax_sig1$padj)
+row.names(res_table1) <- rownames(res_tax_sig1)
+
+data_to_write1 <-res_tax_sig1[,c("baseMean","log2FoldChange","pvalue","padj","Phylum", "Class", "Order", "Family", "Genus","Species","Taxonomy","OTU")]
+data_to_write1$DifferentiallyAbundant <-levels(meta.st[,"Location"])[as.numeric(data_to_write1$log2FoldChange>0)+1]
+
+# Total numer of OTUs DA
+nrow(data_to_write1) #differentially abundant ASVs
+length(unique(data_to_write1$Genus)) #how many genera
+length(unique(data_to_write1$Taxonomy)) #how many species
+write.csv(data_to_write1,"./tables/deseq_comparison_mm_vs_bc.csv",sep="")
+df1 <- mutate(data_to_write1, Taxonomy, Taxonomy= paste(data_to_write1$Taxonomy ))
+```
+
+```{r fig.cap = "Differential abundance of significant ASVs between Murchison Mountain and Burwood Centre", fig.width=12, fig.height=13, dpi=300}
+bc.mm.st <- ggplot(df1, aes(log2FoldChange, Taxonomy)) + 
+  geom_point(aes(color = DifferentiallyAbundant), shape = 21, size = 3, stroke = 2) + 
+  scale_color_manual(values= c("#DD3C51","#1F6683"), name = "Location", labels = c("Burwood Centre", "Murchison Mountain")) + my_theme + 
+  labs(y = "Species") +
+  theme(axis.text.y = element_text(face="italic", size = 15),
+        panel.border = element_rect(color="black",size=0.7,linetype=1, fill = "NA"), 
+        panel.background = element_blank(),
+        axis.title.y = element_text(size = 35),
+        axis.title.x = element_text(size=23),
+        legend.box.background = element_rect(),
+        legend.box.margin = margin(5, 5, 5, 5),
+        legend.title = element_text(face = "bold", size = 23),
+        legend.text = element_text(size = 20), 
+        legend.position = "top") +  geom_vline(xintercept = 0) 
+bc.mm.st 
+ggsave("./core/Deseq_bc_mm.png", width = 12, height = 13, dpi=400)
+```
+
+
+```{r}
+save.image(file = "takahe_data.Rdata")
+```
+
